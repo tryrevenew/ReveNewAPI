@@ -12,7 +12,23 @@ cp config.example.js config.js
 2. Edit `config.js` and update the following configurations:
 
 ### MongoDB Configuration
-- Update the MongoDB URI with your database credentials:
+- Create a MongoDB account
+- Create a new cluster
+  - Choose the Free Tier (M0) for a free shared cluster (sufficient for 90% of the cases)
+- In the left sidebar, click Database Access.
+  - Click Add New Database User.
+  - Enter a username and password — this will be used in your URI.
+  - Set user privileges (default is “Read and write to any database”).
+  - Save the user.
+- In the left sidebar, click Network Access.
+  - Click Add IP Address.
+  - You can add your current IP by clicking Add Current IP Address or add 0.0.0.0/0 to allow access from anywhere (less secure).
+  - Save the changes.
+- Go back to the Clusters page.
+  - Click Connect on your cluster.
+  - Select Connect your application.
+  - Copy the connection string provided. 
+- Update the MongoDB URI with your database connecting string that looks like:
   ```javascript
   mongodb: {
     uri: "mongodb+srv://your_username:your_password@your_cluster.mongodb.net/your_database?retryWrites=true&w=majority"
@@ -22,7 +38,7 @@ cp config.example.js config.js
 ### Firebase Configuration
 - Create a new Firebase project at [Firebase Console](https://console.firebase.google.com)
 - Generate a new private key for your service account
-- <img width="1435" alt="Screenshot 2025-05-25 at 16 32 59" src="https://github.com/user-attachments/assets/13d342ce-fab2-41fd-b9d7-c05387fb4c24" />
+- <img width="1435" alt="Screenshot 2025-05-25 at 16 32 59" src="https://github.com/user-attachments/assets/311135c5-b8f9-42aa-a6fe-be6460477af7" />
 - Update the Firebase configuration in `config.js` with your service account details:
   ```javascript
   firebase: {
@@ -34,7 +50,7 @@ cp config.example.js config.js
   }
   ```
 - (Optional) If you want to receive Push Notifications for each transactions inside your ReveNew app you have to setup Apple Push Notifications in the Cloud Messaging section of Firebase
-- <img width="1445" alt="Firebase_Messagging" src="https://github.com/user-attachments/assets/fa41140d-6c1f-4bb9-88bc-d2f41c9d4062" />
+- <img width="1445" alt="Firebase_Messagging" src="https://github.com/user-attachments/assets/a6dc3aaf-407f-45dd-806e-ad4519e7451f" />
 - You can follow any online tutorial on "How to generate Apple Push Certificate"
 
 
