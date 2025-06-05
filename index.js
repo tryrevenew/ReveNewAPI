@@ -41,6 +41,8 @@ const purchaseSchema = new mongoose.Schema({
   isSandbox: { type: Boolean, required: true },
   appName: { type: String, required: true },
   storeFront: { type: String },
+  isTrial: { type: Boolean, default: false },
+  trialPeriod: { type: String },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -92,12 +94,23 @@ const Download = mongoose.model('Download', downloadSchema);
 
   // Log Purchase and Send Push to all users with userToken
   app.post('/api/v1/log-purchase', async (req, res) => {
-    const { currencyCode, price, priceFormatted, kind, isSandbox, appName, storeFront } = req.body;
+    const { currencyCode, price, priceFormatted, kind, isSandbox, appName, storeFront, isTrial, trialPeriod } = req.body;
     if (!currencyCode || price == null || !kind || isSandbox == null || !appName) {
       return res.status(400).json({ success: false, message: 'Missing fields' });
     }
 
-    const purchase = { currencyCode, price, priceFormatted, kind, isSandbox, appName, storeFront, createdAt: new Date() };
+    const purchase = { 
+      currencyCode, 
+      price, 
+      priceFormatted, 
+      kind, 
+      isSandbox, 
+      appName, 
+      storeFront, 
+      isTrial: isTrial || false,
+      trialPeriod,
+      createdAt: new Date() 
+    };
 
     try {
       await Purchase.create(purchase);
@@ -106,8 +119,10 @@ const Download = mongoose.model('Download', downloadSchema);
       const notifications = users.map(user => ({
         token: user.userToken,
         notification: {
-          title: `New Purchase - ${appName}`,
-          body: `Purchased ${kind} for ${priceFormatted}`
+          title: `New ${isTrial ? 'Trial' : 'Purchase'} - ${appName}`,
+          body: isTrial 
+            ? `Started ${trialPeriod || ''} trial for ${kind}`
+            : `Purchased ${kind} for ${priceFormatted}`
         },
         apns: {
           payload: {
@@ -134,12 +149,31 @@ const Download = mongoose.model('Download', downloadSchema);
 
   // Retrieve Purchases + Total in USD
   app.get('/api/v1/purchases', async (req, res) => {
-    const { appName, page = 1, limit = 10, startDate, endDate, includeSandbox = 'true' } = req.query;
+    const { 
+      appName, 
+      page = 1, 
+      limit = 10, 
+      startDate, 
+      endDate, 
+      includeSandbox = 'true',
+      includeTrials = 'true',
+      trialStatus
+    } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
   
     const query = {};
     if (appName) query.appName = appName;
     if (includeSandbox === 'false') query.isSandbox = false;
+    
+    // Handle trial filtering
+    if (includeTrials === 'false') {
+      query.isTrial = false;
+    } else if (trialStatus === 'trials-only') {
+      query.isTrial = true;
+    } else if (trialStatus === 'paid-only') {
+      query.isTrial = false;
+    }
+    
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
@@ -168,6 +202,9 @@ const Download = mongoose.model('Download', downloadSchema);
   
       // Convert to USD
       const conversions = all.map((p) => {
+        // Don't count trial transactions in the total USD
+        if (p.isTrial) return 0;
+        
         if (!p.currencyCode || isNaN(p.price)) return 0;
         const currencyKey = p.currencyCode.toLowerCase();
         const rateToEUR = 1 / (conversionRates[currencyKey] || 0);
@@ -179,11 +216,20 @@ const Download = mongoose.model('Download', downloadSchema);
       });
   
       const totalUSD = conversions.reduce((sum, val) => sum + val, 0);
+      
+      // Get trial statistics
+      const trialCount = all.filter(p => p.isTrial).length;
+      const paidCount = all.filter(p => !p.isTrial).length;
   
       res.json({
         success: true,
         purchases: paginated,
-        totalInUSD: totalUSD.toFixed(2)
+        totalInUSD: totalUSD.toFixed(2),
+        stats: {
+          total: all.length,
+          trials: trialCount,
+          paid: paidCount
+        }
       });
     } catch (err) {
       res.status(500).json({ success: false, message: 'Error fetching data', error: err });
@@ -226,7 +272,9 @@ app.get('/api/v1/purchases/summary', async (req, res) => {
       { $group: {
         _id: dateFormat,
         purchases: { $push: '$$ROOT' },
-        totalPrice: { $sum: '$price' }
+        totalPrice: { $sum: '$price' },
+        trialCount: { $sum: { $cond: [{ $eq: ['$isTrial', true] }, 1, 0] } },
+        paidCount: { $sum: { $cond: [{ $eq: ['$isTrial', false] }, 1, 0] } }
       }},
       { $sort: { _id: 1 } }
     ]);
@@ -237,6 +285,9 @@ app.get('/api/v1/purchases/summary', async (req, res) => {
 
     const result = grouped.map(group => {
       const groupTotalUSD = group.purchases.reduce((sum, p) => {
+        // Don't count trial transactions in the total USD
+        if (p.isTrial) return sum;
+        
         const currencyKey = p.currencyCode?.toLowerCase();
         const rateToEUR = 1 / (conversionRates[currencyKey] || 0);
         const usdPerEur = conversionRates['usd'];
@@ -248,7 +299,9 @@ app.get('/api/v1/purchases/summary', async (req, res) => {
       return {
         group: formattedDate,
         totalInUSD: parseFloat(groupTotalUSD.toFixed(2)),
-        count: group.purchases.length
+        count: group.purchases.length,
+        trialCount: group.trialCount,
+        paidCount: group.paidCount
       };
     });
 
@@ -382,6 +435,92 @@ app.get('/api/v1/downloads', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error fetching download statistics', 
+      error: err.message 
+    });
+  }
+});
+
+// Get trial conversion statistics
+app.get('/api/v1/trials/stats', async (req, res) => {
+  const { appName, startDate, endDate } = req.query;
+
+  try {
+    const match = {};
+    if (appName) match.appName = appName;
+
+    // Set date range
+    if (startDate || endDate) {
+      match.createdAt = {};
+      if (startDate) match.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setUTCHours(23, 59, 59, 999);
+        match.createdAt.$lte = end;
+      }
+    }
+
+    // Get all purchases within the time period
+    const purchases = await Purchase.find(match).sort({ createdAt: 1 });
+
+    // Group purchases by app name
+    const appStats = {};
+    purchases.forEach(purchase => {
+      if (!appStats[purchase.appName]) {
+        appStats[purchase.appName] = {
+          totalPurchases: 0,
+          trials: 0,
+          conversions: 0,
+          conversionRate: 0,
+          revenue: 0
+        };
+      }
+
+      const stats = appStats[purchase.appName];
+      stats.totalPurchases++;
+
+      if (purchase.isTrial) {
+        stats.trials++;
+      } else {
+        stats.conversions++;
+        
+        // Add to revenue (only count non-trial purchases)
+        if (!isNaN(purchase.price)) {
+          stats.revenue += purchase.price;
+        }
+      }
+    });
+
+    // Calculate conversion rates
+    Object.keys(appStats).forEach(app => {
+      const stats = appStats[app];
+      stats.conversionRate = stats.trials > 0 
+        ? parseFloat((stats.conversions / stats.trials * 100).toFixed(2)) 
+        : 0;
+    });
+
+    // Overall stats
+    const totalTrials = purchases.filter(p => p.isTrial).length;
+    const totalPaid = purchases.filter(p => !p.isTrial).length;
+    const overallConversionRate = totalTrials > 0 
+      ? parseFloat((totalPaid / totalTrials * 100).toFixed(2)) 
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        byApp: appStats,
+        overall: {
+          totalPurchases: purchases.length,
+          trials: totalTrials,
+          conversions: totalPaid,
+          conversionRate: overallConversionRate
+        }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error fetching trial statistics', 
       error: err.message 
     });
   }
